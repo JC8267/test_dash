@@ -356,6 +356,58 @@ select {
   line-height: 1.5;
 }
 
+/* --- Granularity Picker --- */
+.granularity-picker {
+  display: flex;
+  gap: 0;
+  padding: 4px;
+  border-radius: var(--radius-sm);
+  background: rgba(21, 35, 50, 0.06);
+  margin-bottom: 14px;
+}
+
+[data-theme='dark'] .granularity-picker {
+  background: rgba(225, 230, 240, 0.08);
+}
+
+.gran-option {
+  flex: 1;
+  padding: 10px 8px;
+  border: 0;
+  border-radius: calc(var(--radius-sm) - 3px);
+  background: transparent;
+  color: var(--muted);
+  font-size: 0.88rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.25s ease, color 0.25s ease, box-shadow 0.25s ease, transform 0.15s ease;
+}
+
+.gran-option:hover:not(.active) {
+  color: var(--ink);
+  background: rgba(21, 35, 50, 0.04);
+}
+
+[data-theme='dark'] .gran-option:hover:not(.active) {
+  background: rgba(225, 230, 240, 0.05);
+}
+
+.gran-option.active {
+  background: var(--panel-strong);
+  color: var(--ink);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+  font-weight: 600;
+}
+
+[data-theme='dark'] .gran-option.active {
+  background: rgba(225, 230, 240, 0.12);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
+}
+
+.gran-option:active {
+  transform: scale(0.96);
+}
+
 /* --- Fields & Inputs --- */
 .field-grid {
   display: grid;

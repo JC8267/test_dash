@@ -89,6 +89,12 @@
             </div>
 
             <div class="collapsible-body">
+              <div class="granularity-picker" id="granularityPicker" role="radiogroup" aria-label="Map granularity">
+                <button class="gran-option active" data-gran="zip" type="button" role="radio" aria-checked="true">ZIP</button>
+                <button class="gran-option" data-gran="county" type="button" role="radio" aria-checked="false">County</button>
+                <button class="gran-option" data-gran="msa" type="button" role="radio" aria-checked="false">MSA</button>
+                <button class="gran-option" data-gran="state" type="button" role="radio" aria-checked="false">State</button>
+              </div>
               <div class="field-grid two-up">
                 <label class="field-block">
                   <span>State</span>
@@ -180,7 +186,7 @@
           <div class="section-head">
             <div>
               <p class="section-kicker">Leaders</p>
-              <h2>Top ZIPs by selected heat metric</h2>
+              <h2 id="topResultsHeading">Top ZIPs by selected heat metric</h2>
             </div>
             <p class="generated-at">Data rebuilt <span id="generatedAt">-</span></p>
           </div>

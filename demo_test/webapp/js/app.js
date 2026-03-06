@@ -1,6 +1,8 @@
 import {
   COMPARATORS,
   DEFAULT_STATE,
+  GRANULARITIES,
+  GRANULARITIES_BY_ID,
   GROUPS_BY_ID,
   HEAT_GRADIENT,
   METRIC_GROUPS,
@@ -32,6 +34,7 @@ let heatLayer = null;
 let markersLayer = null;
 let rowMarkerMap = new Map();
 let lastFilteredRows = [];
+let lastDisplayRows = [];
 let hasFittedInitialBounds = false;
 let inputDebounce = null;
 let toastTimeout = null;
@@ -89,6 +92,8 @@ function cacheRefs() {
   refs.exportCsv = document.getElementById('exportCsvButton');
   refs.resetAll = document.getElementById('resetAllButton');
   refs.darkToggle = document.getElementById('darkModeToggle');
+  refs.granularityPicker = document.getElementById('granularityPicker');
+  refs.topResultsHeading = document.getElementById('topResultsHeading');
   refs.status = document.getElementById('statusText');
   refs.summaryCards = document.getElementById('summaryCards');
   refs.topResults = document.getElementById('topResults');
@@ -236,7 +241,7 @@ function bindEvents() {
   });
 
   refs.fitResults.addEventListener('click', () => {
-    fitToRows(lastFilteredRows);
+    fitToRows(lastDisplayRows);
   });
 
   refs.exportCsv.addEventListener('click', () => {
@@ -249,6 +254,16 @@ function bindEvents() {
 
   refs.darkToggle.addEventListener('click', () => {
     toggleDarkMode();
+  });
+
+  refs.granularityPicker.addEventListener('click', (event) => {
+    const button = event.target.closest('[data-gran]');
+    if (!button || button.classList.contains('active')) return;
+    state.granularity = button.dataset.gran;
+    syncGranularityPicker();
+    render();
+    pushUrl();
+    showToast(`Viewing by ${GRANULARITIES_BY_ID[state.granularity].label}`);
   });
 
   refs.cutsList.addEventListener('click', (event) => {
@@ -324,7 +339,7 @@ function bindEvents() {
       return;
     }
 
-    const row = lastFilteredRows.find((entry) => entry.z === button.dataset.zip);
+    const row = lastDisplayRows.find((entry) => entry.z === button.dataset.zip);
     if (!row) {
       return;
     }
@@ -370,6 +385,7 @@ function resetAllFilters() {
   refs.searchInput.value = '';
   refs.minPopulation.value = '';
   refs.excludeZero.checked = true;
+  syncGranularityPicker();
 
   hydrateDependentGeography();
   renderCuts();
@@ -378,40 +394,139 @@ function resetAllFilters() {
   showToast('All filters reset');
 }
 
+// --- Granularity ---
+
+function syncGranularityPicker() {
+  refs.granularityPicker.querySelectorAll('[data-gran]').forEach((btn) => {
+    const isActive = btn.dataset.gran === state.granularity;
+    btn.classList.toggle('active', isActive);
+    btn.setAttribute('aria-checked', String(isActive));
+  });
+}
+
+function aggregateRows(filteredRows, metric) {
+  if (state.granularity === 'zip') {
+    return filteredRows;
+  }
+
+  const gran = GRANULARITIES_BY_ID[state.granularity];
+  const groups = new Map();
+
+  for (const row of filteredRows) {
+    const key = row[gran.groupKey] || 'Unknown';
+    if (!groups.has(key)) {
+      groups.set(key, []);
+    }
+    groups.get(key).push(row);
+  }
+
+  const aggregated = [];
+  for (const [key, rows] of groups) {
+    const pop = rows.reduce((s, r) => s + (r.pop || 0), 0);
+    const hh = rows.reduce((s, r) => s + (r.hh || 0), 0);
+
+    // Population-weighted average for the metric
+    let metricVal = null;
+    const metricKey = metric.key;
+    const validMetricRows = rows.filter((r) => r[metricKey] != null && r.pop > 0);
+    if (validMetricRows.length) {
+      const totalPop = validMetricRows.reduce((s, r) => s + r.pop, 0);
+      if (totalPop > 0) {
+        metricVal = validMetricRows.reduce((s, r) => s + r[metricKey] * r.pop, 0) / totalPop;
+      }
+    }
+
+    // Population-weighted centroid
+    const geoRows = rows.filter((r) => Number.isFinite(r.lat) && Number.isFinite(r.lng) && r.pop > 0);
+    let lat = null;
+    let lng = null;
+    if (geoRows.length) {
+      const geoPop = geoRows.reduce((s, r) => s + r.pop, 0);
+      lat = geoRows.reduce((s, r) => s + r.lat * r.pop, 0) / geoPop;
+      lng = geoRows.reduce((s, r) => s + r.lng * r.pop, 0) / geoPop;
+    }
+
+    // Grab representative fields from the largest-population row
+    const biggest = rows.reduce((a, b) => ((a.pop || 0) >= (b.pop || 0) ? a : b));
+
+    aggregated.push({
+      z: key,
+      nm: gran.id === 'county' ? key : (gran.id === 'msa' ? key : (gran.id === 'state' ? key : biggest.nm)),
+      st: biggest.st,
+      cty: biggest.cty,
+      msa: biggest.msa,
+      lat,
+      lng,
+      pop,
+      hh,
+      [metricKey]: metricVal,
+      _zipCount: rows.length,
+    });
+  }
+
+  return aggregated;
+}
+
+function granLabel(plural) {
+  const g = GRANULARITIES_BY_ID[state.granularity];
+  if (plural) {
+    if (g.id === 'county') return 'Counties';
+    if (g.id === 'msa') return 'MSAs';
+    if (g.id === 'state') return 'States';
+    return 'ZIPs';
+  }
+  return g.label;
+}
+
 // --- CSV Export ---
 
 function exportFilteredCsv() {
-  if (!lastFilteredRows.length) {
+  if (!lastDisplayRows.length) {
     showToast('No results to export');
     return;
   }
 
   const metric = METRICS_BY_ID[state.selectedMetricId];
-  const headers = ['ZIP', 'Name', 'County', 'State', 'MSA', 'Population', 'Households', metric.label];
+  const gran = state.granularity;
+  const isZip = gran === 'zip';
+  const headers = isZip
+    ? ['ZIP', 'Name', 'County', 'State', 'MSA', 'Population', 'Households', metric.label]
+    : [granLabel(false), 'State', 'Population', 'Households', 'ZIP Count', metric.label];
   const csvRows = [headers.join(',')];
 
-  for (const row of lastFilteredRows) {
-    csvRows.push([
-      row.z,
-      csvEscape(row.nm || ''),
-      csvEscape(row.cty || ''),
-      row.st || '',
-      csvEscape(row.msa || ''),
-      row.pop || 0,
-      row.hh || 0,
-      row[metric.key] != null ? row[metric.key] : '',
-    ].join(','));
+  for (const row of lastDisplayRows) {
+    if (isZip) {
+      csvRows.push([
+        row.z,
+        csvEscape(row.nm || ''),
+        csvEscape(row.cty || ''),
+        row.st || '',
+        csvEscape(row.msa || ''),
+        row.pop || 0,
+        row.hh || 0,
+        row[metric.key] != null ? row[metric.key] : '',
+      ].join(','));
+    } else {
+      csvRows.push([
+        csvEscape(row.z),
+        row.st || '',
+        row.pop || 0,
+        row.hh || 0,
+        row._zipCount || 0,
+        row[metric.key] != null ? row[metric.key] : '',
+      ].join(','));
+    }
   }
 
   const blob = new Blob([csvRows.join('\n')], { type: 'text/csv;charset=utf-8;' });
   const url = URL.createObjectURL(blob);
   const link = document.createElement('a');
   link.href = url;
-  link.download = `zip_demographics_${state.selectedMetricId}_${Date.now()}.csv`;
+  link.download = `demographics_${gran}_${state.selectedMetricId}_${Date.now()}.csv`;
   link.click();
   URL.revokeObjectURL(url);
 
-  showToast(`Exported ${formatters.integer.format(lastFilteredRows.length)} rows`);
+  showToast(`Exported ${formatters.integer.format(lastDisplayRows.length)} ${granLabel(true).toLowerCase()}`);
 }
 
 function csvEscape(value) {
@@ -427,6 +542,7 @@ function csvEscape(value) {
 function pushUrl() {
   const params = new URLSearchParams();
   if (state.selectedMetricId !== DEFAULT_STATE.selectedMetricId) params.set('metric', state.selectedMetricId);
+  if (state.granularity !== DEFAULT_STATE.granularity) params.set('gran', state.granularity);
   if (state.state) params.set('state', state.state);
   if (state.county) params.set('county', state.county);
   if (state.msa) params.set('msa', state.msa);
@@ -455,6 +571,9 @@ function restoreFromUrl() {
   if (params.has('metric') && METRICS_BY_ID[params.get('metric')]) {
     state.selectedMetricId = params.get('metric');
   }
+  if (params.has('gran') && GRANULARITIES_BY_ID[params.get('gran')]) {
+    state.granularity = params.get('gran');
+  }
   if (params.has('state')) state.state = params.get('state');
   if (params.has('county')) state.county = params.get('county');
   if (params.has('msa')) state.msa = params.get('msa');
@@ -482,6 +601,7 @@ function restoreFromUrl() {
   refs.searchInput.value = state.search;
   refs.minPopulation.value = state.minPopulation;
   refs.excludeZero.checked = state.excludeZero;
+  syncGranularityPicker();
 }
 
 // --- Hydration ---
@@ -684,15 +804,17 @@ function render() {
 
   const metric = METRICS_BY_ID[state.selectedMetricId];
   const filteredRows = allRows.filter((row) => matchesAllFilters(row, metric));
+  const displayRows = aggregateRows(filteredRows, metric);
 
   lastFilteredRows = filteredRows;
+  lastDisplayRows = displayRows;
 
   updateMetricDescription(metric);
   updateLegend(metric);
-  updateStatus(filteredRows);
-  updateSummaryCards(filteredRows, metric);
-  updateTopResults(filteredRows, metric);
-  updateMap(filteredRows, metric);
+  updateStatus(filteredRows, displayRows);
+  updateSummaryCards(displayRows, metric);
+  updateTopResults(displayRows, metric);
+  updateMap(displayRows, metric);
 }
 
 function matchesAllFilters(row, selectedMetric) {
@@ -800,11 +922,15 @@ function updateLegend(metric) {
   `;
 }
 
-function updateStatus(rows) {
-  const statesCovered = new Set(rows.map((row) => row.st).filter(Boolean)).size;
-  const population = rows.reduce((sum, row) => sum + (row.pop || 0), 0);
+function updateStatus(zipRows, displayRows) {
+  const statesCovered = new Set(zipRows.map((row) => row.st).filter(Boolean)).size;
+  const population = zipRows.reduce((sum, row) => sum + (row.pop || 0), 0);
 
-  refs.status.textContent = `${formatters.integer.format(rows.length)} ZIPs matched across ${formatters.integer.format(statesCovered)} states, representing ${formatters.integer.format(population)} people.`;
+  if (state.granularity === 'zip') {
+    refs.status.textContent = `${formatters.integer.format(zipRows.length)} ZIPs matched across ${formatters.integer.format(statesCovered)} states, representing ${formatters.integer.format(population)} people.`;
+  } else {
+    refs.status.textContent = `${formatters.integer.format(displayRows.length)} ${granLabel(true)} (${formatters.integer.format(zipRows.length)} ZIPs) across ${formatters.integer.format(statesCovered)} states, representing ${formatters.integer.format(population)} people.`;
+  }
 }
 
 function updateSummaryCards(rows, metric) {
@@ -816,11 +942,14 @@ function updateSummaryCards(rows, metric) {
     : null;
   const topRow = getTopRows(rows, metric, 1)[0] || null;
 
+  const unitLabel = granLabel(true);
+  const unitSingular = granLabel(false);
+
   refs.summaryCards.innerHTML = [
-    buildSummaryCard('Matching ZIPs', formatters.integer.format(rows.length), `${formatters.integer.format(new Set(rows.map((row) => row.st).filter(Boolean)).size)} states in play`),
+    buildSummaryCard(`Matching ${unitLabel}`, formatters.integer.format(rows.length), `${formatters.integer.format(new Set(rows.map((row) => row.st).filter(Boolean)).size)} states in play`),
     buildSummaryCard('Population In View', formatters.integer.format(population), `${formatters.integer.format(households)} households across the current cut`),
-    buildSummaryCard(`Average ${metric.shortLabel}`, averageMetric == null ? 'No data' : formatMetricValue(metric, averageMetric), 'Average across the matched ZIP set'),
-    buildSummaryCard('Top ZIP', topRow ? `${topRow.z} · ${topRow.nm || topRow.cty || topRow.st}` : 'No matches', topRow ? `${formatMetricValue(metric, topRow[metric.key])} on the selected heat metric` : 'Adjust the filters to recover results'),
+    buildSummaryCard(`Average ${metric.shortLabel}`, averageMetric == null ? 'No data' : formatMetricValue(metric, averageMetric), `Average across the matched ${unitLabel.toLowerCase()}`),
+    buildSummaryCard(`Top ${unitSingular}`, topRow ? `${topRow.z}${topRow.nm && topRow.nm !== topRow.z ? ' · ' + (topRow.nm || topRow.cty || topRow.st) : ''}` : 'No matches', topRow ? `${formatMetricValue(metric, topRow[metric.key])} on the selected heat metric` : 'Adjust the filters to recover results'),
   ].join('');
 }
 
@@ -836,24 +965,38 @@ function buildSummaryCard(label, value, detail) {
 
 function updateTopResults(rows, metric) {
   const topRows = getTopRows(rows, metric, 12);
+  const unitLabel = granLabel(true);
+
+  refs.topResultsHeading.textContent = `Top ${unitLabel} by selected heat metric`;
 
   if (!topRows.length) {
     refs.topResults.innerHTML = `
       <div class="empty-slot compact">
-        <p>No ZIPs match the current geography and demographic cuts.</p>
+        <p>No ${unitLabel.toLowerCase()} match the current geography and demographic cuts.</p>
       </div>
     `;
     return;
   }
 
+  const isZip = state.granularity === 'zip';
+
   refs.topResults.innerHTML = topRows
     .map((row, index) => {
-      const secondary = [row.nm, row.cty, row.st].filter(Boolean).join(' · ');
+      let secondary;
+      if (isZip) {
+        secondary = [row.nm, row.cty, row.st].filter(Boolean).join(' · ');
+      } else {
+        const parts = [];
+        if (state.granularity !== 'state' && row.st) parts.push(row.st);
+        if (row._zipCount) parts.push(`${formatters.integer.format(row._zipCount)} ZIPs`);
+        parts.push(`Pop ${formatters.integer.format(row.pop || 0)}`);
+        secondary = parts.join(' · ');
+      }
       return `
-        <button class="result-row" type="button" data-zip="${row.z}">
+        <button class="result-row" type="button" data-zip="${escapeAttribute(row.z)}">
           <span class="result-rank">${index + 1}</span>
           <span class="result-copy">
-            <strong>${row.z}</strong>
+            <strong>${escapeHtml(row.z)}</strong>
             <span>${escapeHtml(secondary)}</span>
           </span>
           <span class="result-metric">${formatMetricValue(metric, row[metric.key])}</span>
@@ -878,6 +1021,22 @@ function updateMap(rows, metric) {
   const stats = meta.metrics[metric.id];
   const heatPoints = [];
 
+  // Adjust heat radius for coarser granularities
+  const radiusMap = { zip: 26, county: 34, msa: 42, state: 56 };
+  const blurMap = { zip: 22, county: 28, msa: 34, state: 42 };
+  const newRadius = radiusMap[state.granularity] || 26;
+  const newBlur = blurMap[state.granularity] || 22;
+  if (heatLayer.options.radius !== newRadius || heatLayer.options.blur !== newBlur) {
+    map.removeLayer(heatLayer);
+    heatLayer = L.heatLayer([], {
+      radius: newRadius,
+      blur: newBlur,
+      maxZoom: 11,
+      minOpacity: 0.35,
+      gradient: HEAT_GRADIENT,
+    }).addTo(map);
+  }
+
   for (const row of rows) {
     const weight = normalizeMetricValue(row[metric.key], metric, stats);
     if (!Number.isFinite(weight) || !Number.isFinite(row.lat) || !Number.isFinite(row.lng)) {
@@ -899,7 +1058,9 @@ function renderMarkers(rows, metric) {
   markersLayer.clearLayers();
   rowMarkerMap = new Map();
 
-  const topRows = getTopRows(rows, metric, 20);
+  const markerCountMap = { zip: 20, county: 30, msa: 40, state: 60 };
+  const markerCount = markerCountMap[state.granularity] || 20;
+  const topRows = getTopRows(rows, metric, markerCount);
   topRows.forEach((row, index) => {
     if (!Number.isFinite(row.lat) || !Number.isFinite(row.lng)) {
       return;
@@ -919,14 +1080,27 @@ function renderMarkers(rows, metric) {
 }
 
 function buildPopupContent(row, metric) {
+  const isZip = state.granularity === 'zip';
+  const title = isZip
+    ? `${row.z} · ${row.nm || row.cty || 'Selected ZIP'}`
+    : row.z;
+  const subtitle = isZip
+    ? [row.cty, row.st].filter(Boolean).join(', ')
+    : (state.granularity !== 'state' ? row.st || '' : '');
+
+  let extra = '';
+  if (!isZip && row._zipCount) {
+    extra = `<p><strong>${granLabel(true)} ZIPs:</strong> ${formatters.integer.format(row._zipCount)}</p>`;
+  }
+
   return `
     <div class="popup-copy">
-      <p class="popup-title">${escapeHtml(row.z)} · ${escapeHtml(row.nm || row.cty || 'Selected ZIP')}</p>
-      <p class="popup-subtitle">${escapeHtml([row.cty, row.st].filter(Boolean).join(', '))}</p>
+      <p class="popup-title">${escapeHtml(title)}</p>
+      ${subtitle ? `<p class="popup-subtitle">${escapeHtml(subtitle)}</p>` : ''}
       <p><strong>${escapeHtml(metric.label)}:</strong> ${escapeHtml(formatMetricValue(metric, row[metric.key]))}</p>
       <p><strong>Population:</strong> ${escapeHtml(formatters.integer.format(row.pop || 0))}</p>
       <p><strong>Households:</strong> ${escapeHtml(formatters.integer.format(row.hh || 0))}</p>
-      <p><strong>MSA:</strong> ${escapeHtml(row.msa || 'Unassigned')}</p>
+      ${extra}
     </div>
   `;
 }

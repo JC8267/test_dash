@@ -424,8 +424,18 @@ export const COMPARATORS = [
   },
 ];
 
+export const GRANULARITIES = [
+  { id: 'zip', label: 'ZIP', groupKey: 'z', nameKey: 'nm' },
+  { id: 'county', label: 'County', groupKey: 'cty', nameKey: 'cty' },
+  { id: 'msa', label: 'MSA', groupKey: 'msa', nameKey: 'msa' },
+  { id: 'state', label: 'State', groupKey: 'st', nameKey: 'st' },
+];
+
+export const GRANULARITIES_BY_ID = Object.fromEntries(GRANULARITIES.map((g) => [g.id, g]));
+
 export const DEFAULT_STATE = {
   selectedMetricId: 'mhi',
+  granularity: 'zip',
   state: '',
   county: '',
   msa: '',
