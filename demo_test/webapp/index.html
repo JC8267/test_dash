@@ -3,10 +3,10 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>ZIP Demographic Heatmap Explorer</title>
+    <title>Demographic Heatmap Explorer</title>
     <meta
       name="description"
-      content="Explore ZIP-level demographic heatmaps with grouped geography filters and custom demographic cuts."
+      content="Explore demographic heatmaps across ZIP, county, MSA, and state with grouped geography filters and custom demo cuts."
     />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
@@ -36,7 +36,7 @@
       <aside class="control-rail">
         <div class="rail-inner">
           <section class="hero-block glass-card reveal">
-            <p class="eyebrow">ZIP-Level Demo Explorer</p>
+            <p class="eyebrow">Multi-Granularity Demo Explorer</p>
             <h1>Heatmap the audience cuts you actually care about.</h1>
             <p class="hero-copy">
               Pick a primary heat metric, narrow the geography, then stack demographic cuts by age,
@@ -96,15 +96,15 @@
                 <button class="gran-option" data-gran="state" type="button" role="radio" aria-checked="false">State</button>
               </div>
               <div class="field-grid two-up">
-                <label class="field-block">
+                <label id="stateField" class="field-block">
                   <span>State</span>
                   <select id="stateSelect"></select>
                 </label>
-                <label class="field-block">
+                <label id="countyField" class="field-block">
                   <span>County</span>
                   <select id="countySelect"></select>
                 </label>
-                <label class="field-block wide">
+                <label id="msaField" class="field-block wide">
                   <span>MSA</span>
                   <select id="msaSelect"></select>
                 </label>
@@ -118,7 +118,7 @@
                 </label>
                 <label class="toggle-block">
                   <input id="excludeZero" type="checkbox" checked />
-                  <span>Exclude zero-population ZIPs</span>
+                  <span id="excludeZeroLabel">Exclude zero-population ZIPs</span>
                 </label>
               </div>
             </div>

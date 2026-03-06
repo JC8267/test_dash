@@ -473,6 +473,17 @@ input:focus {
   accent-color: var(--accent-deep);
 }
 
+.field-block.is-disabled,
+.toggle-block.is-disabled {
+  opacity: 0.55;
+}
+
+.field-block.is-disabled select,
+.field-block.is-disabled input,
+.toggle-block.is-disabled input {
+  cursor: not-allowed;
+}
+
 /* --- Metric Description --- */
 .metric-description {
   display: grid;

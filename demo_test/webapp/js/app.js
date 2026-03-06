@@ -1,7 +1,6 @@
 import {
   COMPARATORS,
   DEFAULT_STATE,
-  GRANULARITIES,
   GRANULARITIES_BY_ID,
   GROUPS_BY_ID,
   HEAT_GRADIENT,
@@ -27,7 +26,20 @@ const formatters = {
   }),
 };
 
-let allRows = [];
+const geographyIndex = {
+  states: [],
+  counties: [],
+  countiesByState: new Map(),
+  msas: [],
+  msasByState: new Map(),
+};
+
+let datasets = {
+  zip: [],
+  county: [],
+  msa: [],
+  state: [],
+};
 let meta = null;
 let map = null;
 let heatLayer = null;
@@ -51,19 +63,27 @@ async function init() {
   try {
     setLoading(true, 'Loading compact demographic dataset...');
 
-    const [rows, metaResponse] = await Promise.all([
+    const [zipRows, rollups, metaResponse] = await Promise.all([
       fetchJson('./data/demos_compact.json'),
+      fetchJson('./data/demos_rollups.json'),
       fetchJson('./data/meta.json'),
     ]);
 
-    allRows = rows;
+    datasets = {
+      zip: zipRows,
+      county: rollups.county || [],
+      msa: rollups.msa || [],
+      state: rollups.state || [],
+    };
     meta = metaResponse;
 
+    buildGeographyIndex();
     hydrateMetricSelects();
-    hydrateGeographySelects();
     renderPopularCuts();
-    renderCuts();
     restoreFromUrl();
+    sanitizeGeographySelections();
+    hydrateGeographySelects();
+    renderCuts();
     render();
 
     setLoading(false);
@@ -78,12 +98,16 @@ function cacheRefs() {
   refs.metricSelect = document.getElementById('metricSelect');
   refs.metricDescription = document.getElementById('metricDescription');
   refs.legendScale = document.getElementById('legendScale');
+  refs.stateField = document.getElementById('stateField');
+  refs.countyField = document.getElementById('countyField');
+  refs.msaField = document.getElementById('msaField');
   refs.stateSelect = document.getElementById('stateSelect');
   refs.countySelect = document.getElementById('countySelect');
   refs.msaSelect = document.getElementById('msaSelect');
   refs.searchInput = document.getElementById('searchInput');
   refs.minPopulation = document.getElementById('minPopulation');
   refs.excludeZero = document.getElementById('excludeZero');
+  refs.excludeZeroLabel = document.getElementById('excludeZeroLabel');
   refs.popularCuts = document.getElementById('popularCuts');
   refs.cutsList = document.getElementById('cutsList');
   refs.addCut = document.getElementById('addCutButton');
@@ -183,19 +207,15 @@ function initMap() {
 function bindEvents() {
   refs.metricSelect.addEventListener('change', () => {
     state.selectedMetricId = refs.metricSelect.value;
+    renderCuts();
     render();
     pushUrl();
   });
 
   refs.stateSelect.addEventListener('change', () => {
     state.state = refs.stateSelect.value;
-    if (state.county && !getCountyOptions().includes(state.county)) {
-      state.county = '';
-    }
-    if (state.msa && !getMsaOptions().includes(state.msa)) {
-      state.msa = '';
-    }
-    hydrateDependentGeography();
+    sanitizeGeographySelections();
+    hydrateGeographySelects();
     render();
     pushUrl();
   });
@@ -259,8 +279,12 @@ function bindEvents() {
   refs.granularityPicker.addEventListener('click', (event) => {
     const button = event.target.closest('[data-gran]');
     if (!button || button.classList.contains('active')) return;
+
     state.granularity = button.dataset.gran;
+    sanitizeGeographySelections({ clearIncompatible: true });
     syncGranularityPicker();
+    hydrateGeographySelects();
+    renderCuts();
     render();
     pushUrl();
     showToast(`Viewing by ${GRANULARITIES_BY_ID[state.granularity].label}`);
@@ -334,12 +358,12 @@ function bindEvents() {
   });
 
   refs.topResults.addEventListener('click', (event) => {
-    const button = event.target.closest('[data-zip]');
+    const button = event.target.closest('[data-row-id]');
     if (!button) {
       return;
     }
 
-    const row = lastDisplayRows.find((entry) => entry.z === button.dataset.zip);
+    const row = lastDisplayRows.find((entry) => entry.id === button.dataset.rowId);
     if (!row) {
       return;
     }
@@ -347,7 +371,6 @@ function bindEvents() {
     focusRow(row);
   });
 
-  // Keyboard shortcuts
   document.addEventListener('keydown', (event) => {
     if (event.key === 'Escape') {
       const activeElement = document.activeElement;
@@ -359,8 +382,9 @@ function bindEvents() {
 
   window.addEventListener('popstate', () => {
     restoreFromUrl();
-    hydrateGeographySelects();
+    sanitizeGeographySelections();
     hydrateMetricSelects();
+    hydrateGeographySelects();
     renderCuts();
     render();
   });
@@ -379,22 +403,19 @@ function scheduleRender() {
 function resetAllFilters() {
   Object.assign(state, { ...DEFAULT_STATE, cuts: [] });
   refs.metricSelect.value = state.selectedMetricId;
-  refs.stateSelect.value = '';
-  refs.countySelect.value = '';
-  refs.msaSelect.value = '';
   refs.searchInput.value = '';
   refs.minPopulation.value = '';
   refs.excludeZero.checked = true;
   syncGranularityPicker();
-
-  hydrateDependentGeography();
+  sanitizeGeographySelections({ clearIncompatible: true });
+  hydrateGeographySelects();
   renderCuts();
   render();
   pushUrl();
   showToast('All filters reset');
 }
 
-// --- Granularity ---
+// --- Granularity & Geography ---
 
 function syncGranularityPicker() {
   refs.granularityPicker.querySelectorAll('[data-gran]').forEach((btn) => {
@@ -404,78 +425,187 @@ function syncGranularityPicker() {
   });
 }
 
-function aggregateRows(filteredRows, metric) {
-  if (state.granularity === 'zip') {
-    return filteredRows;
-  }
+function buildGeographyIndex() {
+  geographyIndex.states = datasets.state
+    .map((row) => row.st)
+    .filter(Boolean)
+    .sort((left, right) => left.localeCompare(right));
 
-  const gran = GRANULARITIES_BY_ID[state.granularity];
-  const groups = new Map();
+  geographyIndex.counties = datasets.county
+    .map((row) => ({
+      value: row.ck,
+      label: formatCountyLabel(row, false),
+      shortLabel: formatCountyLabel(row, true),
+      state: row.st,
+    }))
+    .filter((row) => row.value)
+    .sort((left, right) => left.label.localeCompare(right.label));
 
-  for (const row of filteredRows) {
-    const key = row[gran.groupKey] || 'Unknown';
-    if (!groups.has(key)) {
-      groups.set(key, []);
+  geographyIndex.countiesByState = new Map();
+  geographyIndex.counties.forEach((option) => {
+    if (!option.state) return;
+    if (!geographyIndex.countiesByState.has(option.state)) {
+      geographyIndex.countiesByState.set(option.state, []);
     }
-    groups.get(key).push(row);
-  }
-
-  const aggregated = [];
-  for (const [key, rows] of groups) {
-    const pop = rows.reduce((s, r) => s + (r.pop || 0), 0);
-    const hh = rows.reduce((s, r) => s + (r.hh || 0), 0);
-
-    // Population-weighted average for the metric
-    let metricVal = null;
-    const metricKey = metric.key;
-    const validMetricRows = rows.filter((r) => r[metricKey] != null && r.pop > 0);
-    if (validMetricRows.length) {
-      const totalPop = validMetricRows.reduce((s, r) => s + r.pop, 0);
-      if (totalPop > 0) {
-        metricVal = validMetricRows.reduce((s, r) => s + r[metricKey] * r.pop, 0) / totalPop;
-      }
-    }
-
-    // Population-weighted centroid
-    const geoRows = rows.filter((r) => Number.isFinite(r.lat) && Number.isFinite(r.lng) && r.pop > 0);
-    let lat = null;
-    let lng = null;
-    if (geoRows.length) {
-      const geoPop = geoRows.reduce((s, r) => s + r.pop, 0);
-      lat = geoRows.reduce((s, r) => s + r.lat * r.pop, 0) / geoPop;
-      lng = geoRows.reduce((s, r) => s + r.lng * r.pop, 0) / geoPop;
-    }
-
-    // Grab representative fields from the largest-population row
-    const biggest = rows.reduce((a, b) => ((a.pop || 0) >= (b.pop || 0) ? a : b));
-
-    aggregated.push({
-      z: key,
-      nm: gran.id === 'county' ? key : (gran.id === 'msa' ? key : (gran.id === 'state' ? key : biggest.nm)),
-      st: biggest.st,
-      cty: biggest.cty,
-      msa: biggest.msa,
-      lat,
-      lng,
-      pop,
-      hh,
-      [metricKey]: metricVal,
-      _zipCount: rows.length,
+    geographyIndex.countiesByState.get(option.state).push({
+      value: option.value,
+      label: option.shortLabel,
+      shortLabel: option.shortLabel,
+      state: option.state,
     });
-  }
+  });
+  geographyIndex.countiesByState.forEach((options) => {
+    options.sort((left, right) => left.label.localeCompare(right.label));
+  });
 
-  return aggregated;
+  geographyIndex.msas = datasets.msa
+    .map((row) => ({
+      value: row.mc,
+      label: row.msa || row.z,
+      states: Array.isArray(row.sts) ? row.sts : row.st ? [row.st] : [],
+    }))
+    .filter((row) => row.value && row.label)
+    .sort((left, right) => left.label.localeCompare(right.label));
+
+  geographyIndex.msasByState = new Map();
+  geographyIndex.msas.forEach((option) => {
+    option.states.forEach((stateName) => {
+      if (!geographyIndex.msasByState.has(stateName)) {
+        geographyIndex.msasByState.set(stateName, []);
+      }
+      geographyIndex.msasByState.get(stateName).push({
+        value: option.value,
+        label: option.label,
+        states: option.states,
+      });
+    });
+  });
+  geographyIndex.msasByState.forEach((options) => {
+    options.sort((left, right) => left.label.localeCompare(right.label));
+  });
 }
 
 function granLabel(plural) {
-  const g = GRANULARITIES_BY_ID[state.granularity];
+  const granularity = state.granularity;
   if (plural) {
-    if (g.id === 'county') return 'Counties';
-    if (g.id === 'msa') return 'MSAs';
-    if (g.id === 'state') return 'States';
+    if (granularity === 'county') return 'Counties';
+    if (granularity === 'msa') return 'MSAs';
+    if (granularity === 'state') return 'States';
     return 'ZIPs';
   }
-  return g.label;
+  return GRANULARITIES_BY_ID[granularity].label;
+}
+
+function getFilterCapabilities() {
+  return {
+    county: state.granularity === 'zip' || state.granularity === 'county',
+    msa: state.granularity === 'zip' || state.granularity === 'msa',
+  };
+}
+
+function sanitizeGeographySelections({ clearIncompatible = false } = {}) {
+  const capabilities = getFilterCapabilities();
+
+  if (!geographyIndex.states.includes(state.state)) {
+    state.state = '';
+  }
+
+  if (!capabilities.county && clearIncompatible) {
+    state.county = '';
+  }
+  if (!capabilities.msa && clearIncompatible) {
+    state.msa = '';
+  }
+
+  const validCountyValues = new Set(getCountyOptions().map((option) => option.value));
+  if (!capabilities.county || (state.county && !validCountyValues.has(state.county))) {
+    state.county = '';
+  }
+
+  const validMsaValues = new Set(getMsaOptions().map((option) => option.value));
+  if (!capabilities.msa || (state.msa && !validMsaValues.has(state.msa))) {
+    state.msa = '';
+  }
+}
+
+function hydrateGeographySelects() {
+  populateSelect(
+    refs.stateSelect,
+    geographyIndex.states.map((value) => ({ value, label: value })),
+    'All states',
+    state.state
+  );
+  populateSelect(refs.countySelect, getCountyOptions(), 'All counties', state.county);
+  populateSelect(refs.msaSelect, getMsaOptions(), 'All MSAs', state.msa);
+
+  refs.metricSelect.value = state.selectedMetricId;
+  refs.searchInput.value = state.search;
+  refs.minPopulation.value = state.minPopulation;
+  refs.excludeZero.checked = state.excludeZero;
+  refs.generatedAt.textContent = formatGeneratedAt(meta ? meta.generatedAt : null);
+
+  updateFilterAvailability();
+}
+
+function updateFilterAvailability() {
+  const capabilities = getFilterCapabilities();
+
+  setFieldEnabled(refs.countyField, refs.countySelect, capabilities.county);
+  setFieldEnabled(refs.msaField, refs.msaSelect, capabilities.msa);
+
+  refs.excludeZeroLabel.textContent = `Exclude zero-population ${granLabel(true).toLowerCase()}`;
+  refs.searchInput.placeholder = getSearchPlaceholder();
+}
+
+function setFieldEnabled(wrapper, control, enabled) {
+  wrapper.classList.toggle('is-disabled', !enabled);
+  control.disabled = !enabled;
+}
+
+function getSearchPlaceholder() {
+  if (state.granularity === 'state') return 'State name';
+  if (state.granularity === 'msa') return 'MSA or state';
+  if (state.granularity === 'county') return 'County or state';
+  return 'ZIP, place, county, MSA';
+}
+
+function getCountyOptions() {
+  if (state.state && geographyIndex.countiesByState.has(state.state)) {
+    return geographyIndex.countiesByState.get(state.state);
+  }
+  return geographyIndex.counties;
+}
+
+function getMsaOptions() {
+  if (state.state && geographyIndex.msasByState.has(state.state)) {
+    return geographyIndex.msasByState.get(state.state);
+  }
+  return geographyIndex.msas;
+}
+
+function populateSelect(select, options, placeholder, selectedValue) {
+  const items = [`<option value="">${escapeHtml(placeholder)}</option>`]
+    .concat(
+      options.map((option) => {
+        const value = typeof option === 'string' ? option : option.value;
+        const label = typeof option === 'string' ? option : option.label;
+        const selected = value === selectedValue ? 'selected' : '';
+        return `<option value="${escapeAttribute(value)}" ${selected}>${escapeHtml(label)}</option>`;
+      })
+    )
+    .join('');
+
+  select.innerHTML = items;
+}
+
+function formatCountyLabel(row, short) {
+  if (!row.cty) {
+    return short ? 'Unknown County' : 'Unknown County';
+  }
+  if (short || !row.st) {
+    return row.cty;
+  }
+  return `${row.cty}, ${row.st}`;
 }
 
 // --- CSV Export ---
@@ -487,34 +617,38 @@ function exportFilteredCsv() {
   }
 
   const metric = METRICS_BY_ID[state.selectedMetricId];
-  const gran = state.granularity;
-  const isZip = gran === 'zip';
+  const granularity = state.granularity;
+  const isZip = granularity === 'zip';
   const headers = isZip
     ? ['ZIP', 'Name', 'County', 'State', 'MSA', 'Population', 'Households', metric.label]
-    : [granLabel(false), 'State', 'Population', 'Households', 'ZIP Count', metric.label];
+    : [granLabel(false), 'State Coverage', 'Population', 'Households', 'ZIP Count', metric.label];
   const csvRows = [headers.join(',')];
 
   for (const row of lastDisplayRows) {
     if (isZip) {
-      csvRows.push([
-        row.z,
-        csvEscape(row.nm || ''),
-        csvEscape(row.cty || ''),
-        row.st || '',
-        csvEscape(row.msa || ''),
-        row.pop || 0,
-        row.hh || 0,
-        row[metric.key] != null ? row[metric.key] : '',
-      ].join(','));
+      csvRows.push(
+        [
+          row.z,
+          csvEscape(row.nm || ''),
+          csvEscape(row.cty || ''),
+          csvEscape(row.st || ''),
+          csvEscape(row.msa || ''),
+          row.pop || 0,
+          row.hh || 0,
+          row[metric.key] != null ? row[metric.key] : '',
+        ].join(',')
+      );
     } else {
-      csvRows.push([
-        csvEscape(row.z),
-        row.st || '',
-        row.pop || 0,
-        row.hh || 0,
-        row._zipCount || 0,
-        row[metric.key] != null ? row[metric.key] : '',
-      ].join(','));
+      csvRows.push(
+        [
+          csvEscape(getRowPrimaryLabel(row)),
+          csvEscape(formatStateCoverage(row, true)),
+          row.pop || 0,
+          row.hh || 0,
+          row._zipCount || 0,
+          row[metric.key] != null ? row[metric.key] : '',
+        ].join(',')
+      );
     }
   }
 
@@ -522,7 +656,7 @@ function exportFilteredCsv() {
   const url = URL.createObjectURL(blob);
   const link = document.createElement('a');
   link.href = url;
-  link.download = `demographics_${gran}_${state.selectedMetricId}_${Date.now()}.csv`;
+  link.download = `demographics_${granularity}_${state.selectedMetricId}_${Date.now()}.csv`;
   link.click();
   URL.revokeObjectURL(url);
 
@@ -530,7 +664,7 @@ function exportFilteredCsv() {
 }
 
 function csvEscape(value) {
-  const str = String(value);
+  const str = String(value == null ? '' : value);
   if (str.includes(',') || str.includes('"') || str.includes('\n')) {
     return `"${str.replace(/"/g, '""')}"`;
   }
@@ -566,6 +700,8 @@ function pushUrl() {
 }
 
 function restoreFromUrl() {
+  Object.assign(state, { ...DEFAULT_STATE, cuts: [] });
+
   const params = new URLSearchParams(window.location.search);
 
   if (params.has('metric') && METRICS_BY_ID[params.get('metric')]) {
@@ -592,11 +728,10 @@ function restoreFromUrl() {
         value2: entry.v2,
       }));
     } catch (_) {
-      // Invalid cuts data, ignore
+      state.cuts = [];
     }
   }
 
-  // Sync UI with state
   refs.metricSelect.value = state.selectedMetricId;
   refs.searchInput.value = state.search;
   refs.minPopulation.value = state.minPopulation;
@@ -621,46 +756,6 @@ function buildMetricOptions(selectedMetricId) {
 
     return `<optgroup label="${group.label}">${options}</optgroup>`;
   }).join('');
-}
-
-function hydrateGeographySelects() {
-  populateSelect(refs.stateSelect, meta.states, 'All states', state.state);
-  hydrateDependentGeography();
-  refs.searchInput.value = state.search;
-  refs.minPopulation.value = state.minPopulation;
-  refs.excludeZero.checked = state.excludeZero;
-  refs.generatedAt.textContent = formatGeneratedAt(meta.generatedAt);
-}
-
-function hydrateDependentGeography() {
-  populateSelect(refs.countySelect, getCountyOptions(), 'All counties', state.county);
-  populateSelect(refs.msaSelect, getMsaOptions(), 'All MSAs', state.msa);
-}
-
-function getCountyOptions() {
-  if (state.state && meta.statesMeta[state.state]) {
-    return meta.statesMeta[state.state].counties;
-  }
-  return meta.counties;
-}
-
-function getMsaOptions() {
-  if (state.state && meta.statesMeta[state.state]) {
-    return meta.statesMeta[state.state].msas;
-  }
-  return meta.msas;
-}
-
-function populateSelect(select, options, placeholder, selectedValue) {
-  const items = [`<option value="">${placeholder}</option>`]
-    .concat(
-      options.map(
-        (option) => `<option value="${escapeAttribute(option)}" ${option === selectedValue ? 'selected' : ''}>${escapeHtml(option)}</option>`
-      )
-    )
-    .join('');
-
-  select.innerHTML = items;
 }
 
 // --- Popular Cuts ---
@@ -727,14 +822,11 @@ function createId() {
 }
 
 function defaultCutValue(metric, comparator) {
-  const stats = meta && meta.metrics ? meta.metrics[metric.id] : null;
+  const stats = getOverallMetricStats(metric.id);
   if (!stats) {
     return '';
   }
-  if (comparator === 'lte') {
-    return stats.p50;
-  }
-  return stats.p50;
+  return comparator === 'lte' ? stats.p50 : stats.p50;
 }
 
 function renderCuts() {
@@ -752,7 +844,7 @@ function renderCuts() {
     .map((cut) => {
       const metric = METRICS_BY_ID[cut.metricId];
       const group = GROUPS_BY_ID[metric.group];
-      const stats = meta && meta.metrics ? meta.metrics[metric.id] : null;
+      const stats = getOverallMetricStats(metric.id);
       const step = metric.inputStep || metric.comparatorStep || 1;
       const betweenActive = cut.comparator === 'between';
 
@@ -788,7 +880,7 @@ function renderCuts() {
               <input type="number" step="${step}" data-field="value2" value="${escapeAttribute(cut.value2)}" />
             </label>
           </div>
-          <p class="cut-hint">${escapeHtml(metric.description)} ${stats ? `Typical range ${formatMetricValue(metric, stats.p05)} to ${formatMetricValue(metric, stats.p95)}.` : ''}</p>
+          <p class="cut-hint">${escapeHtml(metric.description)} ${stats ? `Typical ${granLabel(true).toLowerCase()} range ${formatMetricValue(metric, stats.p05)} to ${formatMetricValue(metric, stats.p95)}.` : ''}</p>
         </article>
       `;
     })
@@ -798,44 +890,45 @@ function renderCuts() {
 // --- Render ---
 
 function render() {
-  if (!allRows.length || !meta) {
-    return;
-  }
-
   const metric = METRICS_BY_ID[state.selectedMetricId];
-  const filteredRows = allRows.filter((row) => matchesAllFilters(row, metric));
-  const displayRows = aggregateRows(filteredRows, metric);
+  const currentRows = getCurrentRows();
+  const displayRows = currentRows.filter((row) => matchesAllFilters(row, metric));
+  const visibleStats = computeMetricStats(displayRows, metric) || getOverallMetricStats(metric.id);
 
-  lastFilteredRows = filteredRows;
+  lastFilteredRows = displayRows;
   lastDisplayRows = displayRows;
 
   updateMetricDescription(metric);
-  updateLegend(metric);
-  updateStatus(filteredRows, displayRows);
+  updateLegend(metric, visibleStats);
+  updateStatus(displayRows);
   updateSummaryCards(displayRows, metric);
   updateTopResults(displayRows, metric);
-  updateMap(displayRows, metric);
+  updateMap(displayRows, metric, visibleStats);
+}
+
+function getCurrentRows() {
+  return datasets[state.granularity] || [];
 }
 
 function matchesAllFilters(row, selectedMetric) {
-  if (state.excludeZero && row.pop <= 0) {
-    return false;
-  }
-
-  if (state.state && row.st !== state.state) {
-    return false;
-  }
-
-  if (state.county && row.cty !== state.county) {
-    return false;
-  }
-
-  if (state.msa && row.msa !== state.msa) {
+  if (state.excludeZero && (row.pop || 0) <= 0) {
     return false;
   }
 
   const minPopulation = Number(state.minPopulation || 0);
-  if (Number.isFinite(minPopulation) && minPopulation > 0 && row.pop < minPopulation) {
+  if (Number.isFinite(minPopulation) && minPopulation > 0 && (row.pop || 0) < minPopulation) {
+    return false;
+  }
+
+  if (!matchesStateFilter(row)) {
+    return false;
+  }
+
+  if (!matchesCountyFilter(row)) {
+    return false;
+  }
+
+  if (!matchesMsaFilter(row)) {
     return false;
   }
 
@@ -882,6 +975,33 @@ function matchesAllFilters(row, selectedMetric) {
   return true;
 }
 
+function matchesStateFilter(row) {
+  if (!state.state) {
+    return true;
+  }
+  return extractStates(row).includes(state.state);
+}
+
+function matchesCountyFilter(row) {
+  if (!state.county) {
+    return true;
+  }
+  if (state.granularity === 'zip' || state.granularity === 'county') {
+    return row.ck === state.county;
+  }
+  return true;
+}
+
+function matchesMsaFilter(row) {
+  if (!state.msa) {
+    return true;
+  }
+  if (state.granularity === 'zip' || state.granularity === 'msa') {
+    return row.mc === state.msa;
+  }
+  return true;
+}
+
 function matchesSearch(row, query) {
   const normalizedQuery = query.trim().toLowerCase();
   if (!normalizedQuery) {
@@ -889,6 +1009,7 @@ function matchesSearch(row, query) {
   }
 
   const haystack = [row.z, row.nm, row.cty, row.msa, row.st]
+    .concat(extractStates(row))
     .filter(Boolean)
     .join(' ')
     .toLowerCase();
@@ -898,18 +1019,17 @@ function matchesSearch(row, query) {
 
 function updateMetricDescription(metric) {
   const group = GROUPS_BY_ID[metric.group];
-  const stats = meta.metrics[metric.id];
+  const stats = getOverallMetricStats(metric.id);
 
   refs.metricDescription.innerHTML = `
     <span class="metric-group-label">${escapeHtml(group.label)}</span>
     <strong>${escapeHtml(metric.label)}</strong>
     <span>${escapeHtml(metric.description)}</span>
-    ${stats ? `<span>Nationwide middle range: ${formatMetricValue(metric, stats.p05)} to ${formatMetricValue(metric, stats.p95)}.</span>` : ''}
+    ${stats ? `<span>Typical ${granLabel(true).toLowerCase()} range: ${formatMetricValue(metric, stats.p05)} to ${formatMetricValue(metric, stats.p95)}.</span>` : ''}
   `;
 }
 
-function updateLegend(metric) {
-  const stats = meta.metrics[metric.id];
+function updateLegend(metric, stats) {
   if (!stats) {
     refs.legendScale.textContent = 'No legend available';
     return;
@@ -922,15 +1042,17 @@ function updateLegend(metric) {
   `;
 }
 
-function updateStatus(zipRows, displayRows) {
-  const statesCovered = new Set(zipRows.map((row) => row.st).filter(Boolean)).size;
-  const population = zipRows.reduce((sum, row) => sum + (row.pop || 0), 0);
+function updateStatus(rows) {
+  const statesCovered = countCoveredStates(rows);
+  const population = rows.reduce((sum, row) => sum + (row.pop || 0), 0);
 
   if (state.granularity === 'zip') {
-    refs.status.textContent = `${formatters.integer.format(zipRows.length)} ZIPs matched across ${formatters.integer.format(statesCovered)} states, representing ${formatters.integer.format(population)} people.`;
-  } else {
-    refs.status.textContent = `${formatters.integer.format(displayRows.length)} ${granLabel(true)} (${formatters.integer.format(zipRows.length)} ZIPs) across ${formatters.integer.format(statesCovered)} states, representing ${formatters.integer.format(population)} people.`;
+    refs.status.textContent = `${formatters.integer.format(rows.length)} ZIPs matched across ${formatters.integer.format(statesCovered)} states, representing ${formatters.integer.format(population)} people.`;
+    return;
   }
+
+  const zipCoverage = rows.reduce((sum, row) => sum + (row._zipCount || 0), 0);
+  refs.status.textContent = `${formatters.integer.format(rows.length)} ${granLabel(true)} matched across ${formatters.integer.format(statesCovered)} states, covering ${formatters.integer.format(zipCoverage)} ZIPs and ${formatters.integer.format(population)} people.`;
 }
 
 function updateSummaryCards(rows, metric) {
@@ -946,10 +1068,10 @@ function updateSummaryCards(rows, metric) {
   const unitSingular = granLabel(false);
 
   refs.summaryCards.innerHTML = [
-    buildSummaryCard(`Matching ${unitLabel}`, formatters.integer.format(rows.length), `${formatters.integer.format(new Set(rows.map((row) => row.st).filter(Boolean)).size)} states in play`),
+    buildSummaryCard(`Matching ${unitLabel}`, formatters.integer.format(rows.length), `${formatters.integer.format(countCoveredStates(rows))} states in play`),
     buildSummaryCard('Population In View', formatters.integer.format(population), `${formatters.integer.format(households)} households across the current cut`),
     buildSummaryCard(`Average ${metric.shortLabel}`, averageMetric == null ? 'No data' : formatMetricValue(metric, averageMetric), `Average across the matched ${unitLabel.toLowerCase()}`),
-    buildSummaryCard(`Top ${unitSingular}`, topRow ? `${topRow.z}${topRow.nm && topRow.nm !== topRow.z ? ' · ' + (topRow.nm || topRow.cty || topRow.st) : ''}` : 'No matches', topRow ? `${formatMetricValue(metric, topRow[metric.key])} on the selected heat metric` : 'Adjust the filters to recover results'),
+    buildSummaryCard(`Top ${unitSingular}`, topRow ? getRowPrimaryLabel(topRow) : 'No matches', topRow ? `${formatMetricValue(metric, topRow[metric.key])} on the selected heat metric` : 'Adjust the filters to recover results'),
   ].join('');
 }
 
@@ -978,25 +1100,14 @@ function updateTopResults(rows, metric) {
     return;
   }
 
-  const isZip = state.granularity === 'zip';
-
   refs.topResults.innerHTML = topRows
     .map((row, index) => {
-      let secondary;
-      if (isZip) {
-        secondary = [row.nm, row.cty, row.st].filter(Boolean).join(' · ');
-      } else {
-        const parts = [];
-        if (state.granularity !== 'state' && row.st) parts.push(row.st);
-        if (row._zipCount) parts.push(`${formatters.integer.format(row._zipCount)} ZIPs`);
-        parts.push(`Pop ${formatters.integer.format(row.pop || 0)}`);
-        secondary = parts.join(' · ');
-      }
+      const secondary = getRowSecondaryLabel(row);
       return `
-        <button class="result-row" type="button" data-zip="${escapeAttribute(row.z)}">
+        <button class="result-row" type="button" data-row-id="${escapeAttribute(row.id)}">
           <span class="result-rank">${index + 1}</span>
           <span class="result-copy">
-            <strong>${escapeHtml(row.z)}</strong>
+            <strong>${escapeHtml(getRowPrimaryLabel(row))}</strong>
             <span>${escapeHtml(secondary)}</span>
           </span>
           <span class="result-metric">${formatMetricValue(metric, row[metric.key])}</span>
@@ -1017,11 +1128,9 @@ function getTopRows(rows, metric, count) {
 
 // --- Map Updates ---
 
-function updateMap(rows, metric) {
-  const stats = meta.metrics[metric.id];
+function updateMap(rows, metric, stats) {
   const heatPoints = [];
 
-  // Adjust heat radius for coarser granularities
   const radiusMap = { zip: 26, county: 34, msa: 42, state: 56 };
   const blurMap = { zip: 22, county: 28, msa: 34, state: 42 };
   const newRadius = radiusMap[state.granularity] || 26;
@@ -1075,23 +1184,16 @@ function renderMarkers(rows, metric) {
     }).bindPopup(buildPopupContent(row, metric));
 
     marker.addTo(markersLayer);
-    rowMarkerMap.set(row.z, marker);
+    rowMarkerMap.set(row.id, marker);
   });
 }
 
 function buildPopupContent(row, metric) {
-  const isZip = state.granularity === 'zip';
-  const title = isZip
-    ? `${row.z} · ${row.nm || row.cty || 'Selected ZIP'}`
-    : row.z;
-  const subtitle = isZip
-    ? [row.cty, row.st].filter(Boolean).join(', ')
-    : (state.granularity !== 'state' ? row.st || '' : '');
-
-  let extra = '';
-  if (!isZip && row._zipCount) {
-    extra = `<p><strong>${granLabel(true)} ZIPs:</strong> ${formatters.integer.format(row._zipCount)}</p>`;
-  }
+  const title = getRowPrimaryLabel(row);
+  const subtitle = getRowSubtitle(row);
+  const extra = state.granularity === 'zip'
+    ? ''
+    : `<p><strong>ZIP coverage:</strong> ${formatters.integer.format(row._zipCount || 0)}</p>`;
 
   return `
     <div class="popup-copy">
@@ -1106,10 +1208,12 @@ function buildPopupContent(row, metric) {
 }
 
 function focusRow(row) {
-  const marker = rowMarkerMap.get(row.z);
-  map.flyTo([row.lat, row.lng], Math.max(map.getZoom(), 9), {
-    duration: 0.8,
-  });
+  const marker = rowMarkerMap.get(row.id);
+  if (Number.isFinite(row.lat) && Number.isFinite(row.lng)) {
+    map.flyTo([row.lat, row.lng], Math.max(map.getZoom(), 9), {
+      duration: 0.8,
+    });
+  }
 
   if (marker) {
     window.setTimeout(() => {
@@ -1137,7 +1241,98 @@ function fitToRows(rows) {
   });
 }
 
+// --- Row Copy ---
+
+function getRowPrimaryLabel(row) {
+  return row.z || row.nm || row.st || row.id;
+}
+
+function getRowSecondaryLabel(row) {
+  if (state.granularity === 'zip') {
+    return [row.nm, row.cty, row.st].filter(Boolean).join(' · ');
+  }
+
+  const parts = [];
+  const stateCoverage = formatStateCoverage(row, false);
+  if (stateCoverage && state.granularity !== 'state') parts.push(stateCoverage);
+  if (row._zipCount) parts.push(`${formatters.integer.format(row._zipCount)} ZIPs`);
+  parts.push(`Pop ${formatters.integer.format(row.pop || 0)}`);
+  return parts.join(' · ');
+}
+
+function getRowSubtitle(row) {
+  if (state.granularity === 'zip') {
+    return [row.cty, row.st].filter(Boolean).join(', ');
+  }
+  if (state.granularity === 'state') {
+    return '';
+  }
+  return formatStateCoverage(row, true);
+}
+
+function formatStateCoverage(row, full) {
+  const states = extractStates(row);
+  if (!states.length) {
+    return '';
+  }
+  if (full || states.length <= 2) {
+    return states.join(', ');
+  }
+  return `${states[0]} +${states.length - 1} more`;
+}
+
+function extractStates(row) {
+  if (Array.isArray(row.sts) && row.sts.length) {
+    return row.sts;
+  }
+  if (row.st) {
+    return [row.st];
+  }
+  return [];
+}
+
+function countCoveredStates(rows) {
+  const states = new Set();
+  rows.forEach((row) => {
+    extractStates(row).forEach((stateName) => states.add(stateName));
+  });
+  return states.size;
+}
+
 // --- Utilities ---
+
+function getOverallMetricStats(metricId) {
+  return meta && meta.datasets && meta.datasets[state.granularity] && meta.datasets[state.granularity].metrics
+    ? meta.datasets[state.granularity].metrics[metricId]
+    : null;
+}
+
+function computeMetricStats(rows, metric) {
+  const values = rows
+    .map((row) => row[metric.key])
+    .filter((value) => value != null && Number.isFinite(value))
+    .sort((left, right) => left - right);
+
+  if (!values.length) {
+    return null;
+  }
+
+  return {
+    min: values[0],
+    max: values[values.length - 1],
+    p05: pickQuantile(values, 0.05),
+    p50: pickQuantile(values, 0.5),
+    p95: pickQuantile(values, 0.95),
+  };
+}
+
+function pickQuantile(values, quantile) {
+  if (!values.length) {
+    return 0;
+  }
+  const index = Math.max(0, Math.min(values.length - 1, Math.round((values.length - 1) * quantile)));
+  return values[index];
+}
 
 function normalizeMetricValue(value, metric, stats) {
   if (value == null || !stats) {
