@@ -1,0 +1,167 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>ZIP Demographic Heatmap Explorer</title>
+    <meta
+      name="description"
+      content="Explore ZIP-level demographic heatmaps with grouped geography filters and custom demographic cuts."
+    />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,600;9..144,700&family=Sora:wght@400;500;600;700&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="./vendor/leaflet/leaflet.css" />
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div class="ambient-grid"></div>
+    <div id="loadingOverlay" class="loading-overlay">
+      <div class="loading-card">
+        <span class="eyebrow">Preparing explorer</span>
+        <h2>Building the map state</h2>
+        <p>Loading compact demographic dataset...</p>
+      </div>
+    </div>
+
+    <div class="shell">
+      <aside class="control-rail">
+        <div class="rail-inner">
+          <section class="hero-block glass-card reveal">
+            <p class="eyebrow">ZIP-Level Demo Explorer</p>
+            <h1>Heatmap the audience cuts you actually care about.</h1>
+            <p class="hero-copy">
+              Pick a primary heat metric, narrow the geography, then stack demographic cuts by age,
+              race, income, housing, and workforce profile.
+            </p>
+            <div class="hero-note">
+              <span>Source:</span>
+              <strong>demos.csv rebuilt for browser use</strong>
+            </div>
+          </section>
+
+          <section class="glass-card reveal" style="--delay: 0.05s">
+            <div class="section-head">
+              <div>
+                <p class="section-kicker">Heat Metric</p>
+                <h2>What drives the heat</h2>
+              </div>
+            </div>
+
+            <label class="field-block">
+              <span>Shade the map by</span>
+              <select id="metricSelect"></select>
+            </label>
+
+            <div id="metricDescription" class="metric-description"></div>
+
+            <div class="legend-block">
+              <div class="legend-gradient"></div>
+              <div id="legendScale" class="legend-scale"></div>
+            </div>
+          </section>
+
+          <section class="glass-card reveal" style="--delay: 0.1s">
+            <div class="section-head">
+              <div>
+                <p class="section-kicker">Geography</p>
+                <h2>Anchor the map</h2>
+              </div>
+            </div>
+
+            <div class="field-grid two-up">
+              <label class="field-block">
+                <span>State</span>
+                <select id="stateSelect"></select>
+              </label>
+              <label class="field-block">
+                <span>County</span>
+                <select id="countySelect"></select>
+              </label>
+              <label class="field-block wide">
+                <span>MSA</span>
+                <select id="msaSelect"></select>
+              </label>
+              <label class="field-block wide">
+                <span>Area search</span>
+                <input id="searchInput" type="text" placeholder="ZIP, place, county, MSA" />
+              </label>
+              <label class="field-block">
+                <span>Minimum population</span>
+                <input id="minPopulation" type="number" min="0" step="100" placeholder="0" />
+              </label>
+              <label class="toggle-block">
+                <input id="excludeZero" type="checkbox" checked />
+                <span>Exclude zero-population ZIPs</span>
+              </label>
+            </div>
+          </section>
+
+          <section class="glass-card reveal" style="--delay: 0.15s">
+            <div class="section-head">
+              <div>
+                <p class="section-kicker">Grouped Presets</p>
+                <h2>Popular cuts</h2>
+              </div>
+            </div>
+            <div id="popularCuts" class="preset-grid"></div>
+          </section>
+
+          <section class="glass-card reveal" style="--delay: 0.2s">
+            <div class="section-head row-head">
+              <div>
+                <p class="section-kicker">Custom Logic</p>
+                <h2>Demographic cuts</h2>
+              </div>
+              <div class="button-row">
+                <button id="addCutButton" class="primary-button" type="button">Add cut</button>
+                <button id="clearCutsButton" class="ghost-button" type="button">Clear all</button>
+              </div>
+            </div>
+            <div id="cutsList" class="cuts-stack"></div>
+          </section>
+
+          <section class="glass-card reveal" style="--delay: 0.25s">
+            <div class="section-head">
+              <div>
+                <p class="section-kicker">Snapshot</p>
+                <h2>Current slice</h2>
+              </div>
+            </div>
+            <div id="summaryCards" class="summary-grid"></div>
+          </section>
+        </div>
+      </aside>
+
+      <main class="map-stage">
+        <div class="map-topbar glass-card reveal" style="--delay: 0.05s">
+          <div>
+            <p class="section-kicker">Live Result Set</p>
+            <p id="statusText" class="status-text">Loading ZIPs...</p>
+          </div>
+          <button id="fitResultsButton" class="primary-button warm" type="button">Refocus results</button>
+        </div>
+
+        <div id="map" class="map-frame reveal" style="--delay: 0.1s"></div>
+
+        <section class="results-panel glass-card reveal" style="--delay: 0.15s">
+          <div class="section-head">
+            <div>
+              <p class="section-kicker">Leaders</p>
+              <h2>Top ZIPs by selected heat metric</h2>
+            </div>
+            <p class="generated-at">Data rebuilt <span id="generatedAt">-</span></p>
+          </div>
+          <div id="topResults" class="results-list"></div>
+        </section>
+      </main>
+    </div>
+
+    <script src="./vendor/leaflet/leaflet.js"></script>
+    <script src="./vendor/leaflet-heat/leaflet-heat.js"></script>
+    <script type="module" src="./js/app.js"></script>
+  </body>
+</html>

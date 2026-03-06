@@ -1,0 +1,4 @@
+demos.csv
+.venv/
+__pycache__/
+scripts/__pycache__/
