@@ -38,6 +38,23 @@ python3 serve_webapp.py --port 8000
 
 Then open `http://localhost:8000`.
 
+## Deploy on Vercel
+
+This app is already prebuilt as a static site in `demo_test/webapp`, so Vercel does not need a build step.
+
+1. Push this repo to GitHub.
+2. In Vercel, import the repository.
+3. Set `Root Directory` to `demo_test/webapp`.
+4. Use `Framework Preset = Other`.
+5. Leave `Build Command` empty.
+6. Leave `Output Directory` empty so Vercel serves the project root directly.
+
+Notes:
+
+- `demo_test/webapp/vercel.json` is scoped to the deployed app root and enables clean URLs.
+- The deployed site uses the committed JSON bundle in `demo_test/webapp/data/`.
+- If `demos.csv` changes, rerun `python3 scripts/build_demo_dataset.py` from `demo_test/`, then commit the updated JSON files.
+
 ## Curated metrics in the app
 
 The raw CSV is reduced to a smaller set of derived ZIP-level metrics so the app stays responsive:
