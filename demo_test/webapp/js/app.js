@@ -34,11 +34,14 @@ let rowMarkerMap = new Map();
 let lastFilteredRows = [];
 let hasFittedInitialBounds = false;
 let inputDebounce = null;
+let toastTimeout = null;
 
 window.addEventListener('DOMContentLoaded', init);
 
 async function init() {
   cacheRefs();
+  initDarkMode();
+  initCollapsibles();
   initMap();
   bindEvents();
 
@@ -57,6 +60,7 @@ async function init() {
     hydrateGeographySelects();
     renderPopularCuts();
     renderCuts();
+    restoreFromUrl();
     render();
 
     setLoading(false);
@@ -82,11 +86,68 @@ function cacheRefs() {
   refs.addCut = document.getElementById('addCutButton');
   refs.clearCuts = document.getElementById('clearCutsButton');
   refs.fitResults = document.getElementById('fitResultsButton');
+  refs.exportCsv = document.getElementById('exportCsvButton');
+  refs.resetAll = document.getElementById('resetAllButton');
+  refs.darkToggle = document.getElementById('darkModeToggle');
   refs.status = document.getElementById('statusText');
   refs.summaryCards = document.getElementById('summaryCards');
   refs.topResults = document.getElementById('topResults');
   refs.generatedAt = document.getElementById('generatedAt');
+  refs.toast = document.getElementById('toast');
 }
+
+// --- Dark Mode ---
+
+function initDarkMode() {
+  const saved = localStorage.getItem('theme');
+  if (saved === 'dark' || (!saved && window.matchMedia('(prefers-color-scheme: dark)').matches)) {
+    document.documentElement.setAttribute('data-theme', 'dark');
+  }
+}
+
+function toggleDarkMode() {
+  const isDark = document.documentElement.getAttribute('data-theme') === 'dark';
+  const next = isDark ? 'light' : 'dark';
+  document.documentElement.setAttribute('data-theme', next);
+  localStorage.setItem('theme', next);
+  showToast(next === 'dark' ? 'Dark mode enabled' : 'Light mode enabled');
+}
+
+// --- Collapsible Sections ---
+
+function initCollapsibles() {
+  document.querySelectorAll('.collapsible').forEach((section) => {
+    section.setAttribute('aria-expanded', 'true');
+    const trigger = section.querySelector('.collapsible-trigger');
+    if (!trigger) return;
+
+    trigger.addEventListener('click', () => toggleCollapsible(section));
+    trigger.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter' || event.key === ' ') {
+        event.preventDefault();
+        toggleCollapsible(section);
+      }
+    });
+  });
+}
+
+function toggleCollapsible(section) {
+  const expanded = section.getAttribute('aria-expanded') === 'true';
+  section.setAttribute('aria-expanded', String(!expanded));
+}
+
+// --- Toast ---
+
+function showToast(message) {
+  clearTimeout(toastTimeout);
+  refs.toast.textContent = message;
+  refs.toast.classList.add('visible');
+  toastTimeout = setTimeout(() => {
+    refs.toast.classList.remove('visible');
+  }, 2400);
+}
+
+// --- Map ---
 
 function initMap() {
   map = L.map('map', {
@@ -112,10 +173,13 @@ function initMap() {
   markersLayer = L.layerGroup().addTo(map);
 }
 
+// --- Events ---
+
 function bindEvents() {
   refs.metricSelect.addEventListener('change', () => {
     state.selectedMetricId = refs.metricSelect.value;
     render();
+    pushUrl();
   });
 
   refs.stateSelect.addEventListener('change', () => {
@@ -128,16 +192,19 @@ function bindEvents() {
     }
     hydrateDependentGeography();
     render();
+    pushUrl();
   });
 
   refs.countySelect.addEventListener('change', () => {
     state.county = refs.countySelect.value;
     render();
+    pushUrl();
   });
 
   refs.msaSelect.addEventListener('change', () => {
     state.msa = refs.msaSelect.value;
     render();
+    pushUrl();
   });
 
   refs.searchInput.addEventListener('input', () => {
@@ -153,6 +220,7 @@ function bindEvents() {
   refs.excludeZero.addEventListener('change', () => {
     state.excludeZero = refs.excludeZero.checked;
     render();
+    pushUrl();
   });
 
   refs.addCut.addEventListener('click', () => {
@@ -163,10 +231,24 @@ function bindEvents() {
     state.cuts = [];
     renderCuts();
     render();
+    pushUrl();
+    showToast('All cuts cleared');
   });
 
   refs.fitResults.addEventListener('click', () => {
     fitToRows(lastFilteredRows);
+  });
+
+  refs.exportCsv.addEventListener('click', () => {
+    exportFilteredCsv();
+  });
+
+  refs.resetAll.addEventListener('click', () => {
+    resetAllFilters();
+  });
+
+  refs.darkToggle.addEventListener('click', () => {
+    toggleDarkMode();
   });
 
   refs.cutsList.addEventListener('click', (event) => {
@@ -185,6 +267,7 @@ function bindEvents() {
       state.cuts = state.cuts.filter((cut) => cut.id !== cutId);
       renderCuts();
       render();
+      pushUrl();
     }
   });
 
@@ -215,6 +298,7 @@ function bindEvents() {
 
     renderCuts();
     render();
+    pushUrl();
   });
 
   refs.cutsList.addEventListener('input', (event) => {
@@ -247,14 +331,160 @@ function bindEvents() {
 
     focusRow(row);
   });
+
+  // Keyboard shortcuts
+  document.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape') {
+      const activeElement = document.activeElement;
+      if (activeElement && (activeElement.tagName === 'INPUT' || activeElement.tagName === 'SELECT')) {
+        activeElement.blur();
+      }
+    }
+  });
+
+  window.addEventListener('popstate', () => {
+    restoreFromUrl();
+    hydrateGeographySelects();
+    hydrateMetricSelects();
+    renderCuts();
+    render();
+  });
 }
 
 function scheduleRender() {
   clearTimeout(inputDebounce);
   inputDebounce = window.setTimeout(() => {
     render();
+    pushUrl();
   }, 120);
 }
+
+// --- Reset All ---
+
+function resetAllFilters() {
+  Object.assign(state, { ...DEFAULT_STATE, cuts: [] });
+  refs.metricSelect.value = state.selectedMetricId;
+  refs.stateSelect.value = '';
+  refs.countySelect.value = '';
+  refs.msaSelect.value = '';
+  refs.searchInput.value = '';
+  refs.minPopulation.value = '';
+  refs.excludeZero.checked = true;
+
+  hydrateDependentGeography();
+  renderCuts();
+  render();
+  pushUrl();
+  showToast('All filters reset');
+}
+
+// --- CSV Export ---
+
+function exportFilteredCsv() {
+  if (!lastFilteredRows.length) {
+    showToast('No results to export');
+    return;
+  }
+
+  const metric = METRICS_BY_ID[state.selectedMetricId];
+  const headers = ['ZIP', 'Name', 'County', 'State', 'MSA', 'Population', 'Households', metric.label];
+  const csvRows = [headers.join(',')];
+
+  for (const row of lastFilteredRows) {
+    csvRows.push([
+      row.z,
+      csvEscape(row.nm || ''),
+      csvEscape(row.cty || ''),
+      row.st || '',
+      csvEscape(row.msa || ''),
+      row.pop || 0,
+      row.hh || 0,
+      row[metric.key] != null ? row[metric.key] : '',
+    ].join(','));
+  }
+
+  const blob = new Blob([csvRows.join('\n')], { type: 'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = `zip_demographics_${state.selectedMetricId}_${Date.now()}.csv`;
+  link.click();
+  URL.revokeObjectURL(url);
+
+  showToast(`Exported ${formatters.integer.format(lastFilteredRows.length)} rows`);
+}
+
+function csvEscape(value) {
+  const str = String(value);
+  if (str.includes(',') || str.includes('"') || str.includes('\n')) {
+    return `"${str.replace(/"/g, '""')}"`;
+  }
+  return str;
+}
+
+// --- URL State ---
+
+function pushUrl() {
+  const params = new URLSearchParams();
+  if (state.selectedMetricId !== DEFAULT_STATE.selectedMetricId) params.set('metric', state.selectedMetricId);
+  if (state.state) params.set('state', state.state);
+  if (state.county) params.set('county', state.county);
+  if (state.msa) params.set('msa', state.msa);
+  if (state.search) params.set('q', state.search);
+  if (state.minPopulation) params.set('minpop', state.minPopulation);
+  if (!state.excludeZero) params.set('zero', '1');
+
+  if (state.cuts.length) {
+    const cutsData = state.cuts.map((cut) => ({
+      m: cut.metricId,
+      c: cut.comparator,
+      v1: cut.value1,
+      v2: cut.value2,
+    }));
+    params.set('cuts', btoa(JSON.stringify(cutsData)));
+  }
+
+  const search = params.toString();
+  const newUrl = search ? `?${search}` : window.location.pathname;
+  window.history.replaceState(null, '', newUrl);
+}
+
+function restoreFromUrl() {
+  const params = new URLSearchParams(window.location.search);
+
+  if (params.has('metric') && METRICS_BY_ID[params.get('metric')]) {
+    state.selectedMetricId = params.get('metric');
+  }
+  if (params.has('state')) state.state = params.get('state');
+  if (params.has('county')) state.county = params.get('county');
+  if (params.has('msa')) state.msa = params.get('msa');
+  if (params.has('q')) state.search = params.get('q');
+  if (params.has('minpop')) state.minPopulation = params.get('minpop');
+  if (params.has('zero')) state.excludeZero = false;
+
+  if (params.has('cuts')) {
+    try {
+      const cutsData = JSON.parse(atob(params.get('cuts')));
+      state.cuts = cutsData.map((entry) => ({
+        id: createId(),
+        metricId: entry.m,
+        comparator: entry.c,
+        value1: entry.v1,
+        value2: entry.v2,
+      }));
+    } catch (_) {
+      // Invalid cuts data, ignore
+    }
+  }
+
+  // Sync UI with state
+  refs.metricSelect.value = state.selectedMetricId;
+  refs.searchInput.value = state.search;
+  refs.minPopulation.value = state.minPopulation;
+  refs.excludeZero.checked = state.excludeZero;
+}
+
+// --- Hydration ---
 
 function hydrateMetricSelects() {
   refs.metricSelect.innerHTML = buildMetricOptions(state.selectedMetricId);
@@ -313,6 +543,8 @@ function populateSelect(select, options, placeholder, selectedValue) {
   select.innerHTML = items;
 }
 
+// --- Popular Cuts ---
+
 function renderPopularCuts() {
   refs.popularCuts.innerHTML = METRIC_GROUPS.map((group) => {
     const cuts = POPULAR_CUTS.filter((item) => item.group === group.id);
@@ -342,9 +574,12 @@ function renderPopularCuts() {
     button.addEventListener('click', () => {
       const preset = POPULAR_CUTS.find((item) => item.label === button.dataset.preset);
       addCut(preset);
+      showToast(`Added cut: ${preset.label}`);
     });
   });
 }
+
+// --- Cuts ---
 
 function addCut(preset = null) {
   const metricId = preset && preset.metricId ? preset.metricId : 'mhi';
@@ -361,6 +596,7 @@ function addCut(preset = null) {
 
   renderCuts();
   render();
+  pushUrl();
 }
 
 function createId() {
@@ -438,6 +674,8 @@ function renderCuts() {
     })
     .join('');
 }
+
+// --- Render ---
 
 function render() {
   if (!allRows.length || !meta) {
@@ -634,6 +872,8 @@ function getTopRows(rows, metric, count) {
     .map((row) => ({ ...row }));
 }
 
+// --- Map Updates ---
+
 function updateMap(rows, metric) {
   const stats = meta.metrics[metric.id];
   const heatPoints = [];
@@ -722,6 +962,8 @@ function fitToRows(rows) {
     maxZoom: 8,
   });
 }
+
+// --- Utilities ---
 
 function normalizeMetricValue(value, metric, stats) {
   if (value == null || !stats) {
